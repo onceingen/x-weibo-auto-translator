@@ -40,6 +40,11 @@ X_API_KEY = config['API_KEYS']['X_API_KEY']
 X_API_SECRET = config['API_KEYS']['X_API_SECRET']
 X_ACCESS_TOKEN = config['API_KEYS']['X_ACCESS_TOKEN']
 X_ACCESS_TOKEN_SECRET = config['API_KEYS']['X_ACCESS_TOKEN_SECRET']
+X_BEARER_TOKEN = config['API_KEYS'].get('X_BEARER_TOKEN', '')  # 兼容旧配置文件
+
+# 处理 Bearer Token 中的转义字符
+if X_BEARER_TOKEN:
+    X_BEARER_TOKEN = X_BEARER_TOKEN.replace('%%', '%')
 
 OPENAI_API_KEY = config['OPENAI']['OPENAI_API_KEY']
 
@@ -74,39 +79,95 @@ def save_processed_tweet(tweet_id):
             json.dump(processed_tweets, f)
 
 def get_tweets_from_x():
-    """从X获取指定用户的最新推文"""
-    # 测试模式下使用模拟数据
+    """从X获取指定用户的最新推文 (使用 X API v2 和 Bearer Token)"""
+    # 测试模式下，尝试调用真实的 X API v2，如果失败则使用模拟数据
     if TEST_MODE:
-        logger.info(f"测试模式：使用模拟推文数据")
-        # 创建模拟的推文对象
-        class MockTweet:
-            def __init__(self, id, text):
-                self.id = id
-                self.full_text = text
-                # 模拟没有媒体附件
-                self.extended_entities = {}
-        
-        # 返回一些模拟的推文
-        return [
-            MockTweet("1", "This is a test tweet from our mock data. #testing"),
-            MockTweet("2", "Another mock tweet to demonstrate the translation functionality.")
-        ]
+        try:
+            logger.info(f"测试模式：尝试从 X 获取 @{X_USERNAME} 的真实推文 (使用 Bearer Token)")
+            
+            # 创建 v2 API 客户端，使用 Bearer Token
+            client = tweepy.Client(bearer_token=X_BEARER_TOKEN)
+            
+            # 首先获取用户 ID
+            user = client.get_user(username=X_USERNAME)
+            
+            if not user.data:
+                logger.warning(f"测试模式：未找到用户 @{X_USERNAME}，使用模拟数据")
+                return get_mock_tweets()
+                
+            user_id = user.data.id
+            logger.info(f"测试模式：找到用户 ID: {user_id}")
+            
+            # 获取用户推文
+            tweets_response = client.get_users_tweets(
+                id=user_id,
+                max_results=5,
+                tweet_fields=['created_at', 'text']
+            )
+            
+            if not tweets_response.data:
+                logger.warning("测试模式：未找到真实推文，使用模拟数据")
+                return get_mock_tweets()
+            
+            # 转换为自定义的推文对象，与原有流程兼容
+            tweets = []
+            for tweet_data in tweets_response.data:
+                tweet = type('Tweet', (), {})()  # 创建一个空对象
+                tweet.id = tweet_data.id
+                tweet.full_text = tweet_data.text
+                tweet.created_at = tweet_data.created_at
+                tweet.extended_entities = {}  # 目前不处理媒体文件
+                tweets.append(tweet)
+            
+            logger.info(f"测试模式：成功获取 {len(tweets)} 条真实推文")
+            return tweets
+            
+        except Exception as e:
+            logger.error(f"测试模式：获取真实推文失败，错误: {e}，使用模拟数据")
+            return get_mock_tweets()
     
+    # 非测试模式，正常调用 X API v2
     try:
-        # 创建X API客户端
-        auth = tweepy.OAuth1UserHandler(
-            X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
-        )
-        api = tweepy.API(auth)
+        logger.info(f"正在获取 @{X_USERNAME} 的推文 (使用 Bearer Token)")
+        
+        # 创建 v2 API 客户端，使用 Bearer Token
+        client = tweepy.Client(bearer_token=X_BEARER_TOKEN)
         
         # 获取已处理过的推文ID列表
         processed_tweets = load_processed_tweets()
         
-        # 获取用户最新推文
-        tweets = api.user_timeline(screen_name=X_USERNAME, count=10, tweet_mode="extended")
+        # 首先获取用户 ID
+        user = client.get_user(username=X_USERNAME)
+        
+        if not user.data:
+            logger.error(f"未找到用户 @{X_USERNAME}")
+            return []
+            
+        user_id = user.data.id
+        
+        # 获取用户推文
+        tweets_response = client.get_users_tweets(
+            id=user_id,
+            max_results=10,
+            tweet_fields=['created_at', 'text']
+        )
+        
+        if not tweets_response.data:
+            logger.info("未找到推文")
+            return []
+        
+        # 转换为自定义的推文对象，与原有流程兼容
+        all_tweets = []
+        for tweet_data in tweets_response.data:
+            tweet = type('Tweet', (), {})()  # 创建一个空对象
+            tweet.id = tweet_data.id
+            tweet.full_text = tweet_data.text
+            tweet.created_at = tweet_data.created_at
+            tweet.extended_entities = {}  # 目前不处理媒体文件
+            all_tweets.append(tweet)
         
         # 过滤出未处理的推文
-        new_tweets = [tweet for tweet in tweets if str(tweet.id) not in processed_tweets]
+        new_tweets = [tweet for tweet in all_tweets if str(tweet.id) not in processed_tweets]
         
         logger.info(f"找到 {len(new_tweets)} 条未处理的推文")
         return new_tweets
@@ -115,12 +176,49 @@ def get_tweets_from_x():
         logger.error(f"获取推文时出错: {e}")
         return []
 
+def get_mock_tweets():
+    """生成模拟的推文数据"""
+    logger.info("生成模拟推文数据")
+    # 创建模拟的推文对象
+    class MockTweet:
+        def __init__(self, id, text):
+            self.id = id
+            self.full_text = text
+            # 模拟没有媒体附件
+            self.extended_entities = {}
+    
+    # 返回一些模拟的推文
+    return [
+        MockTweet("1", "This is a test tweet from our mock data. #testing"),
+        MockTweet("2", "Another mock tweet to demonstrate the translation functionality.")
+    ]
+
 def translate_text_with_openai(text):
     """使用OpenAI API翻译文本"""
-    # 测试模式下，直接返回原文文本
+    # 测试模式下，尝试调用真实的 OpenAI API
     if TEST_MODE:
-        logger.info(f"测试模式：跳过翻译，原文文本: {text[:50]}..." if len(text) > 50 else f"测试模式：跳过翻译，原文文本: {text}")
-        return f"[测试翻译] {text}"
+        try:
+            logger.info(f"测试模式：尝试使用 OpenAI API 翻译文本")
+            # 设置OpenAI API密钥
+            openai.api_key = OPENAI_API_KEY
+            
+            # 调用API进行翻译
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "你是一位优秀的翻译，能够将文本准确地翻译成简体中文，同时保持原文的风格和感情。"},
+                    {"role": "user", "content": f"请将以下文本翻译成简体中文:\n\n{text}"}
+                ]
+            )
+            
+            # 提取翻译结果
+            translated_text = response.choices[0].message.content.strip()
+            logger.info(f"测试模式：翻译完成")
+            return translated_text
+        
+        except Exception as e:
+            logger.error(f"测试模式：翻译失败，错误: {e}，返回模拟翻译")
+            return f"[测试翻译] {text}"
     
     try:
         # 设置OpenAI API密钥
